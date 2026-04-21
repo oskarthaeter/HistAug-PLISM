@@ -1,6 +1,7 @@
 import json
 import logging
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from pprint import pformat
@@ -9,6 +10,7 @@ from typing import List
 import yaml
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.listconfig import ListConfig
+from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
@@ -19,6 +21,68 @@ from pytorch_lightning.loggers import CSVLogger, WandbLogger
 from utils.constants import TransformCategoryConstants
 
 logger = logging.getLogger(__name__)
+
+
+class NohupProgressBar(Callback):
+    """Line-based progress logger for non-interactive runs (e.g. nohup)."""
+
+    def __init__(self, log_every_n_steps: int = 50):
+        super().__init__()
+        self.log_every_n_steps = max(1, int(log_every_n_steps))
+        self._epoch_start_time = None
+
+    @staticmethod
+    def _to_float(value):
+        if value is None:
+            return None
+        if hasattr(value, "item"):
+            try:
+                return float(value.item())
+            except Exception:
+                return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def on_train_epoch_start(self, trainer, pl_module) -> None:
+        self._epoch_start_time = time.time()
+        if trainer.is_global_zero:
+            print(
+                f"[progress] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} started",
+                flush=True,
+            )
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+        if not trainer.is_global_zero:
+            return
+        total = int(trainer.num_training_batches)
+        step = batch_idx + 1
+        if step % self.log_every_n_steps != 0 and step != total:
+            return
+
+        pct = (100.0 * step / total) if total > 0 else 0.0
+        loss_value = self._to_float(outputs)
+        loss_text = f" loss={loss_value:.5f}" if loss_value is not None else ""
+        print(
+            f"[progress] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} "
+            f"step {step}/{total} ({pct:.1f}%) global_step={trainer.global_step}{loss_text}",
+            flush=True,
+        )
+
+    def on_train_epoch_end(self, trainer, pl_module) -> None:
+        if not trainer.is_global_zero:
+            return
+        elapsed = 0.0
+        if self._epoch_start_time is not None:
+            elapsed = time.time() - self._epoch_start_time
+        val_loss = self._to_float(trainer.callback_metrics.get("val/loss"))
+        val_text = f" val/loss={val_loss:.5f}" if val_loss is not None else ""
+        print(
+            f"[progress] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} "
+            f"finished in {elapsed:.1f}s{val_text}",
+            flush=True,
+        )
 
 
 def ensure_dir(path: Path) -> None:
@@ -63,8 +127,12 @@ def load_loggers(cfg) -> List[WandbLogger]:
     config_path = Path(cfg.config)
 
     wandb_cfg = getattr(cfg, "Wandb", None)
-    project = getattr(wandb_cfg, "project", "HistAug-PLISM") if wandb_cfg else "HistAug-PLISM"
-    run_name = (getattr(wandb_cfg, "run_name", None) if wandb_cfg else None) or config_path.stem
+    project = (
+        getattr(wandb_cfg, "project", "HistAug-PLISM") if wandb_cfg else "HistAug-PLISM"
+    )
+    run_name = (
+        getattr(wandb_cfg, "run_name", None) if wandb_cfg else None
+    ) or config_path.stem
     group = getattr(wandb_cfg, "group", None) if wandb_cfg else None
     tags = list(getattr(wandb_cfg, "tags", None) or []) if wandb_cfg else []
 
@@ -124,7 +192,12 @@ def load_callbacks(cfg):
                 - Scheduler.name: Name of the LR scheduler (optional).
     :return: List of instantiated callback objects.
     """
-    Mycallbacks = [RichProgressBar()]
+    progress_every = int(getattr(cfg.General, "progress_log_every_n_steps", 50))
+    is_interactive = sys.stdout.isatty() and sys.stderr.isatty()
+    if is_interactive:
+        Mycallbacks = [RichProgressBar()]
+    else:
+        Mycallbacks = [NohupProgressBar(log_every_n_steps=progress_every)]
 
     # Make output path
     output_path = cfg.log_path
@@ -267,9 +340,9 @@ def write_split_manifest(datamodule, log_dir, loggers=None) -> dict | None:
             for split_name, c in counts.items():
                 for metric, value in c.items():
                     scalars[f"split/{split_name}/{metric}"] = value
-            scalars["split/holdout_stainings"] = ", ".join(
-                manifest["holdout_stainings"]
-            ) or "(none)"
+            scalars["split/holdout_stainings"] = (
+                ", ".join(manifest["holdout_stainings"]) or "(none)"
+            )
             wb.summary.update(scalars)
 
             rows: list[list] = []

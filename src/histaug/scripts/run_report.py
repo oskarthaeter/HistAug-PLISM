@@ -65,6 +65,11 @@ KEY_METRICS = [
 CMAP_PRED = "RdYlGn"
 CMAP_DIFF = "RdYlGn"
 
+_SCORPION_FOCUS_SOURCE_SCANNERS = {"DP200", "P1000"}
+_SCORPION_FOCUS_TARGET_SCANNERS = {"AT2", "GT450", "P"}
+_SCORPION_SOURCE_ORDER = ["AT2", "GT450", "P", "DP200", "P1000"]
+_SCORPION_TARGET_ORDER = ["AT2", "GT450", "P"]
+
 _DOCS_PATH = Path(__file__).parents[3] / "docs" / "logged_metrics.md"
 
 # ---------------------------------------------------------------------------
@@ -111,11 +116,83 @@ def _build_mean_matrix(
     return mat
 
 
+def _build_source_mean_vector(
+    values: np.ndarray,
+    src_ids: np.ndarray,
+    n: int,
+) -> np.ndarray:
+    """Mean value per source scanner index (ignores src_id < 0)."""
+    sums = np.zeros((n,), dtype=np.float64)
+    counts = np.zeros((n,), dtype=np.int64)
+    valid = src_ids >= 0
+    idx = np.where(valid)[0]
+    np.add.at(sums, src_ids[idx], values[idx])
+    np.add.at(counts, src_ids[idx], 1)
+    out = np.full((n,), np.nan, dtype=np.float64)
+    mask = counts > 0
+    out[mask] = sums[mask] / counts[mask]
+    return out
+
+
+def _canonical_scanner_name(scanner: str) -> str:
+    """Normalize scanner aliases so SCORPION-focused filtering is robust."""
+    s = "".join(ch for ch in str(scanner).upper() if ch.isalnum())
+    alias_to_canonical = {
+        "AT2": "AT2",
+        "APERIOAT2": "AT2",
+        "GT450": "GT450",
+        "APERIOGT450": "GT450",
+        "P": "P",
+        "PHILIPS": "P",
+        "ULTRAFASTSCANNER": "P",
+        "DP200": "DP200",
+        "VENTANADP200": "DP200",
+        "S210": "DP200",
+        "P1000": "P1000",
+        "3DHISTECHP1000": "P1000",
+        "HISTECHP1000": "P1000",
+        "S360": "P1000",
+    }
+    return alias_to_canonical.get(s, s)
+
+
+def _get_scorpion_focus_axes(names: list[str]) -> tuple[list[int], list[int]]:
+    """Return (source_indices, target_indices) for requested SCORPION subset."""
+    src_idx = [
+        i
+        for i, n in enumerate(names)
+        if _canonical_scanner_name(n) in _SCORPION_FOCUS_SOURCE_SCANNERS
+    ]
+    tgt_idx = [
+        i
+        for i, n in enumerate(names)
+        if _canonical_scanner_name(n) in _SCORPION_FOCUS_TARGET_SCANNERS
+    ]
+    return src_idx, tgt_idx
+
+
+def _get_scorpion_rect_axes(
+    names: list[str],
+) -> tuple[list[int], list[str], list[int], list[str]]:
+    """Return ordered row/col indices+labels for rectangular SCORPION heatmaps."""
+    canonical_to_idx: dict[str, int] = {}
+    for i, name in enumerate(names):
+        canon = _canonical_scanner_name(name)
+        if canon not in canonical_to_idx:
+            canonical_to_idx[canon] = i
+
+    src_labels = [s for s in _SCORPION_SOURCE_ORDER if s in canonical_to_idx]
+    tgt_labels = [t for t in _SCORPION_TARGET_ORDER if t in canonical_to_idx]
+    src_idx = [canonical_to_idx[s] for s in src_labels]
+    tgt_idx = [canonical_to_idx[t] for t in tgt_labels]
+    return src_idx, src_labels, tgt_idx, tgt_labels
+
+
 def _build_improvement_matrix(
     imgaug_mat: np.ndarray,
     origtrans_mat: np.ndarray,
 ) -> np.ndarray:
-    """Return imgaug-origtrans per scanner pair, matching W&B off-diagonal logic."""
+    """Return imgaug-origtrans per scanner pair where both terms exist."""
     if imgaug_mat.shape != origtrans_mat.shape:
         raise ValueError("imgaug and origtrans matrices must have identical shapes")
 
@@ -123,8 +200,6 @@ def _build_improvement_matrix(
     diff = np.full((n, n), np.nan, dtype=np.float64)
     for si in range(n):
         for ti in range(n):
-            if si == ti:
-                continue
             a = imgaug_mat[si, ti]
             b = origtrans_mat[si, ti]
             if not (np.isnan(a) or np.isnan(b)):
@@ -145,7 +220,9 @@ def load_h5_data(h5_path: Path) -> dict | None:
     """
     result: dict = {
         "scanner_mat": None,
+        "scanner_orig_mat": None,
         "scanner_diff_mat": None,
+        "scanner_rel_mat": None,
         "scanner_names": None,
         "staining_means": {},
     }
@@ -159,6 +236,15 @@ def load_h5_data(h5_path: Path) -> dict | None:
             tgt_ids = f["tgt_scanner_id"][:].astype(np.int16)
             names: list[str] = json.loads(f.attrs["scanner_names"])
             pred_mat = _build_mean_matrix(cos_imgaug, src_ids, tgt_ids, len(names))
+
+            # Fill predicted diagonal from identity-pass cosine, if exported.
+            if "identity_cosine_similarity" in f:
+                cos_id = f["identity_cosine_similarity"][:].astype(np.float32)
+                id_vec = _build_source_mean_vector(cos_id, src_ids, len(names))
+                for i in range(len(names)):
+                    if not np.isnan(id_vec[i]):
+                        pred_mat[i, i] = id_vec[i]
+
             result["scanner_mat"] = pred_mat
             result["scanner_names"] = names
 
@@ -175,9 +261,37 @@ def load_h5_data(h5_path: Path) -> dict | None:
 
             if cos_orig is not None:
                 orig_mat = _build_mean_matrix(cos_orig, src_ids, tgt_ids, len(names))
+
+                # Fill baseline diagonal from exported self-baseline cosine, if present.
+                if "orig_identity_cosine_similarity" in f:
+                    cos_orig_id = f["orig_identity_cosine_similarity"][:].astype(
+                        np.float32
+                    )
+                    orig_id_vec = _build_source_mean_vector(
+                        cos_orig_id, src_ids, len(names)
+                    )
+                    for i in range(len(names)):
+                        if not np.isnan(orig_id_vec[i]):
+                            orig_mat[i, i] = orig_id_vec[i]
+
+                result["scanner_orig_mat"] = orig_mat
                 result["scanner_diff_mat"] = _build_improvement_matrix(
                     pred_mat, orig_mat
                 )
+
+                rel_mat = np.full((len(names), len(names)), np.nan, dtype=np.float64)
+                for si in range(len(names)):
+                    for ti in range(len(names)):
+                        a = pred_mat[si, ti]
+                        b = orig_mat[si, ti]
+                        if np.isnan(a) or np.isnan(b):
+                            continue
+                        gap = 1.0 - b
+                        if gap > 1e-6:
+                            rel_mat[si, ti] = (a - b) / gap
+                        elif abs(a - b) <= 1e-6:
+                            rel_mat[si, ti] = 0.0
+                result["scanner_rel_mat"] = rel_mat
 
         if "src_staining_id" in f and "staining_names" in f.attrs:
             src_ids = f["src_staining_id"][:].astype(np.int16)
@@ -508,35 +622,37 @@ def build_run_info_page(
 _CELL = 0.54  # inches per scanner cell (about 25% smaller)
 
 
-def _draw_square_heatmap(
+def _draw_heatmap(
     ax: plt.Axes,
     mat: np.ndarray,
-    names: list[str],
+    row_names: list[str],
+    col_names: list[str],
     title: str,
     vmin: float,
 ) -> None:
-    n = len(names)
+    n_rows = len(row_names)
+    n_cols = len(col_names)
     im = ax.imshow(
         mat,
         cmap=CMAP_PRED,
         vmin=vmin,
         vmax=1.0,
-        aspect="equal",
+        aspect="auto",
         interpolation="nearest",
     )
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_xticks(range(n))
-    ax.set_yticks(range(n))
-    ax.set_xticklabels(names, rotation=45, ha="right", fontsize=7)
-    ax.set_yticklabels(names, fontsize=7)
+    ax.set_xticks(range(n_cols))
+    ax.set_yticks(range(n_rows))
+    ax.set_xticklabels(col_names, rotation=45, ha="right", fontsize=7)
+    ax.set_yticklabels(row_names, fontsize=7)
     ax.set_xlabel("Target scanner", fontsize=8)
     ax.set_ylabel("Source scanner", fontsize=8)
     ax.set_title(title, fontsize=9)
     span = max(1.0 - vmin, 1e-6)
     # Keep matrix labels readable as scanner vocab grows.
-    fs = max(12, 8 - n // 6)
-    for si in range(n):
-        for ti in range(n):
+    fs = max(10, 8 - max(n_rows, n_cols) // 6)
+    for si in range(n_rows):
+        for ti in range(n_cols):
             v = mat[si, ti]
             if not np.isnan(v):
                 brightness = (v - vmin) / span
@@ -553,7 +669,7 @@ def _draw_square_heatmap(
 
 
 def build_scanner_heatmaps_page(
-    scanner_data: dict[str, tuple[np.ndarray, list[str]]],
+    scanner_data: dict[str, tuple[np.ndarray, list[str], list[str]]],
     label: str,
 ) -> plt.Figure | None:
     """One figure with all available scanner heatmaps in a single row."""
@@ -565,10 +681,12 @@ def build_scanner_heatmaps_page(
 
     # Use the largest N to size the figure; all phases should share the same
     # scanner vocabulary, but we handle differences gracefully.
-    max_n = max(len(names) for _, names in scanner_data.values())
-    cell_total = max_n * _CELL
-    ax_w = cell_total + 2.5  # colorbar + y-labels
-    ax_h = cell_total + 2.2  # title + x-labels
+    max_rows = max(len(row_names) for _, row_names, _ in scanner_data.values())
+    max_cols = max(len(col_names) for _, _, col_names in scanner_data.values())
+    cell_total_h = max_rows * _CELL
+    cell_total_w = max_cols * _CELL
+    ax_w = cell_total_w + 2.5  # colorbar + y-labels
+    ax_h = cell_total_h + 2.2  # title + x-labels
     fig_w = k * ax_w + 0.4
     fig_h = ax_h + 0.6  # suptitle margin
 
@@ -577,22 +695,31 @@ def build_scanner_heatmaps_page(
         axes = [axes]
 
     for ax, phase in zip(axes, phases):
-        mat, names = scanner_data[phase]
+        mat, row_names, col_names = scanner_data[phase]
         finite = mat[~np.isnan(mat)]
         vmin = max(float(finite.min()) - 0.02, 0.0) if finite.size else 0.8
-        _draw_square_heatmap(ax, mat, names, phase.replace("_", " "), vmin)
+        _draw_heatmap(
+            ax,
+            mat,
+            row_names,
+            col_names,
+            phase.replace("_", " "),
+            vmin,
+        )
 
     fig.suptitle(f"Scanner heatmaps — {label}", fontsize=11)
     return fig
 
 
-def _draw_square_diff_heatmap(
+def _draw_diff_heatmap(
     ax: plt.Axes,
     mat: np.ndarray,
-    names: list[str],
+    row_names: list[str],
+    col_names: list[str],
     title: str,
 ) -> None:
-    n = len(names)
+    n_rows = len(row_names)
+    n_cols = len(col_names)
     finite = mat[~np.isnan(mat)]
     abs_max = max(float(np.abs(finite).max()), 1e-6) if finite.size else 0.1
     vmin, vmax = -abs_max, abs_max
@@ -601,22 +728,22 @@ def _draw_square_diff_heatmap(
         cmap=CMAP_DIFF,
         vmin=vmin,
         vmax=vmax,
-        aspect="equal",
+        aspect="auto",
         interpolation="nearest",
     )
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_xticks(range(n))
-    ax.set_yticks(range(n))
-    ax.set_xticklabels(names, rotation=45, ha="right", fontsize=7)
-    ax.set_yticklabels(names, fontsize=7)
+    ax.set_xticks(range(n_cols))
+    ax.set_yticks(range(n_rows))
+    ax.set_xticklabels(col_names, rotation=45, ha="right", fontsize=7)
+    ax.set_yticklabels(row_names, fontsize=7)
     ax.set_xlabel("Target scanner", fontsize=8)
     ax.set_ylabel("Source scanner", fontsize=8)
     ax.set_title(title, fontsize=9)
 
     span = max(vmax - vmin, 1e-6)
-    fs = max(12, 8 - n // 6)
-    for si in range(n):
-        for ti in range(n):
+    fs = max(10, 8 - max(n_rows, n_cols) // 6)
+    for si in range(n_rows):
+        for ti in range(n_cols):
             v = mat[si, ti]
             if not np.isnan(v):
                 brightness = (v - vmin) / span
@@ -633,7 +760,7 @@ def _draw_square_diff_heatmap(
 
 
 def build_scanner_diff_heatmaps_page(
-    diff_data: dict[str, tuple[np.ndarray, list[str]]],
+    diff_data: dict[str, tuple[np.ndarray, list[str], list[str]]],
     label: str,
 ) -> plt.Figure | None:
     """One figure with all available scanner improvement heatmaps in a single row."""
@@ -643,10 +770,12 @@ def build_scanner_diff_heatmaps_page(
     phases = list(diff_data.keys())
     k = len(phases)
 
-    max_n = max(len(names) for _, names in diff_data.values())
-    cell_total = max_n * _CELL
-    ax_w = cell_total + 2.5
-    ax_h = cell_total + 2.2
+    max_rows = max(len(row_names) for _, row_names, _ in diff_data.values())
+    max_cols = max(len(col_names) for _, _, col_names in diff_data.values())
+    cell_total_h = max_rows * _CELL
+    cell_total_w = max_cols * _CELL
+    ax_w = cell_total_w + 2.5
+    ax_h = cell_total_h + 2.2
     fig_w = k * ax_w + 0.4
     fig_h = ax_h + 0.6
 
@@ -655,11 +784,12 @@ def build_scanner_diff_heatmaps_page(
         axes = [axes]
 
     for ax, phase in zip(axes, phases):
-        mat, names = diff_data[phase]
-        _draw_square_diff_heatmap(
+        mat, row_names, col_names = diff_data[phase]
+        _draw_diff_heatmap(
             ax,
             mat,
-            names,
+            row_names,
+            col_names,
             f"{phase.replace('_', ' ')} (imgaug - origtrans)",
         )
 
@@ -987,8 +1117,10 @@ def main() -> None:
     print("Building metrics table...")
     figures.append(build_metrics_table(find_summary(run_dir), label))
 
-    scanner_data: dict[str, tuple[np.ndarray, list[str]]] = {}
-    scanner_diff_data: dict[str, tuple[np.ndarray, list[str]]] = {}
+    scanner_data: dict[str, tuple[np.ndarray, list[str], list[str]]] = {}
+    scanner_orig_data: dict[str, tuple[np.ndarray, list[str], list[str]]] = {}
+    scanner_diff_data: dict[str, tuple[np.ndarray, list[str], list[str]]] = {}
+    scanner_rel_data: dict[str, tuple[np.ndarray, list[str], list[str]]] = {}
     staining_means: dict[str, dict[str, float]] = {}
 
     for phase in discover_phases(run_dir):
@@ -1001,11 +1133,55 @@ def main() -> None:
             continue
 
         if data["scanner_mat"] is not None:
-            scanner_data[phase] = (data["scanner_mat"], data["scanner_names"])
+            if phase == "scorpion":
+                src_idx, src_labels, tgt_idx, tgt_labels = _get_scorpion_rect_axes(
+                    data["scanner_names"]
+                )
+                if src_idx and tgt_idx:
+                    data["scanner_mat"] = data["scanner_mat"][np.ix_(src_idx, tgt_idx)]
+                    if data["scanner_orig_mat"] is not None:
+                        data["scanner_orig_mat"] = data["scanner_orig_mat"][
+                            np.ix_(src_idx, tgt_idx)
+                        ]
+                    if data["scanner_diff_mat"] is not None:
+                        data["scanner_diff_mat"] = data["scanner_diff_mat"][
+                            np.ix_(src_idx, tgt_idx)
+                        ]
+                    if data["scanner_rel_mat"] is not None:
+                        data["scanner_rel_mat"] = data["scanner_rel_mat"][
+                            np.ix_(src_idx, tgt_idx)
+                        ]
+                else:
+                    print(
+                        "  Warning: SCORPION rectangular view not applied; scanner_names are "
+                        f"{data['scanner_names']}. Need sources {{AT2, GT450, P, DP200, P1000}} and "
+                        "targets {AT2, GT450, P/Philips}."
+                    )
+                    src_labels, tgt_labels = (
+                        data["scanner_names"],
+                        data["scanner_names"],
+                    )
+            else:
+                src_labels, tgt_labels = data["scanner_names"], data["scanner_names"]
+
+            scanner_data[phase] = (data["scanner_mat"], src_labels, tgt_labels)
+            if data["scanner_orig_mat"] is not None:
+                scanner_orig_data[phase] = (
+                    data["scanner_orig_mat"],
+                    src_labels,
+                    tgt_labels,
+                )
             if data["scanner_diff_mat"] is not None:
                 scanner_diff_data[phase] = (
                     data["scanner_diff_mat"],
-                    data["scanner_names"],
+                    src_labels,
+                    tgt_labels,
+                )
+            if data["scanner_rel_mat"] is not None:
+                scanner_rel_data[phase] = (
+                    data["scanner_rel_mat"],
+                    src_labels,
+                    tgt_labels,
                 )
         else:
             print(f"  No scanner metadata in '{phase}'.")

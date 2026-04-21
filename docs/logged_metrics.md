@@ -128,3 +128,16 @@ Logged to W&B as `wandb.Image` objects at the end of val and test epochs when pa
 ```
 
 This controls for pairs that are already very similar (high baseline), making the values comparable across easy and hard scanner combinations. Colormap is diverging, symmetric around 0.
+
+### `scorpion/*` masking rule
+
+For SCORPION test runs, the standard scanner heatmaps keep their original keys
+(`scorpion/scanner_pair_heatmap`, `scorpion/scanner_origtrans_heatmap`,
+`scorpion/scanner_diff_heatmap`, `scorpion/scanner_rel_heatmap`) but are rendered
+as a rectangular matrix:
+
+- source rows: `AT2`, `GT450`, `P`, `DP200`, `P1000`
+- target columns: `AT2`, `GT450`, `P` (`Philips`)
+
+This removes non-SCORPION scanner labels (for example `S60`, `SQ`) from the
+SCORPION view and displays the requested transfer directions directly.

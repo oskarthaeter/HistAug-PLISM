@@ -39,3 +39,4 @@ cython_debug/
 scanner_viz/
 plism
 plism_jpeg
+*.pdf

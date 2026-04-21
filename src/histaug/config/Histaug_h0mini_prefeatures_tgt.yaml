@@ -91,6 +91,8 @@ HistAug:
 Scorpion:
     features_root: /mnt/data/plismbench/features/scorpion/h0_mini
     scanner_name_map:
+        DP200: S210         # SCORPION name -> PLISM scanner surrogate in this checkpoint vocab
+        P1000: S360         # SCORPION name -> PLISM scanner surrogate in this checkpoint vocab
         Philips: P           # SCORPION name → PLISM abbreviation
 
 Wandb:

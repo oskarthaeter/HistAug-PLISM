@@ -1,0 +1,86 @@
+General:
+    comment: HistAug without scanner/staining conditioning (H0-mini)
+    seed: 2025
+    precision: bf16-mixed
+    matmul_precision: medium
+    cudnn_benchmark: true
+    epochs: 15
+    grad_acc: 1
+    server: train
+    log_path: logs/
+    strategy: "auto"
+    devices: 1
+    accelerator: "gpu"
+    ckpt_path_resume_training: null
+
+Data:
+    dataset_name: plism_jpeg_dataset
+    shuffle_data: True
+    data_path: plism_jpeg
+    scanners: []   # empty = all scanners
+    stainings: []  # empty = all stainings
+    organ_loc_csv: plism_organ_loc.csv  # organ-based train/test split (train on 80% of organs)
+    train_split: 0.8  # fraction of organs used for training
+    split_seed: 2025
+    test_max_samples: null
+
+    Transforms:
+        transform_class: PatchAugmentation
+        parameters:
+            h_flip: 0.75
+            v_flip: 0.75
+            rotation: 0.75   # 4-way (0°, 90°, 180°, 270°)
+            gaussian_blur: 0.5
+
+    train_dataloader:
+        batch_size: 32
+        num_workers: 16
+        persistent_workers: false
+        prefetch_factor: 4
+        pin_memory: true
+        drop_last: true
+
+    test_dataloader:
+        batch_size: 32
+        num_workers: 16
+        persistent_workers: false
+        prefetch_factor: 2
+        pin_memory: true
+        drop_last: false
+
+Foundation_model:
+    name: H0-MINI
+    ckpt_path: null
+
+Model:
+    name: histaug_model
+    input_dim: 768
+    chunk_size: 12
+    depth: 12
+    num_heads: 8
+    mlp_ratio: 4
+    use_transform_pos_embeddings: true
+    positional_encoding_type: learnable
+
+Optimizer:
+    name: AdamW
+    parameters:
+        lr: 5e-4
+        weight_decay: 1e-5
+
+Scheduler:
+    name: LinearWarmupCosineAnnealingLR
+    parameters:
+        warmup_epochs: 3
+        T_max: 15
+        eta_min: 1e-6
+
+Loss:
+    base_loss: [CosineSimilarityLoss, SmoothL1Loss]
+    loss_weights: [1, 1]
+
+Wandb:
+    project: HistAug-PLISM
+    run_name: h0mini-unconditioned  # set a short descriptive name before each run
+    group: histaug
+    tags: [h0-mini, unconditioned]
