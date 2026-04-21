@@ -1,3 +1,5 @@
+.devcontainer
+data
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -31,3 +33,9 @@ cython_debug/
 .pypirc
 
 .env
+
+*.log
+*.out
+scanner_viz/
+plism
+plism_jpeg

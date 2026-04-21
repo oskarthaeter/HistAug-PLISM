@@ -1,6 +1,7 @@
 import importlib
 import inspect
 import math
+import multiprocessing as mp
 
 import pytorch_lightning as pl
 from torch.utils.data import ConcatDataset, DataLoader, Subset
@@ -28,8 +29,11 @@ class DataInterface(pl.LightningDataModule):
         train_num_workers=8,
         test_batch_size=1,
         test_num_workers=1,
+        test_max_samples=10000,
         shuffle_data=True,
         dataset_name=None,
+        train_dataloader_cfg=None,
+        test_dataloader_cfg=None,
         **kwargs,
     ):
         super().__init__()
@@ -38,10 +42,42 @@ class DataInterface(pl.LightningDataModule):
         self.train_num_workers = train_num_workers
         self.test_batch_size = test_batch_size
         self.test_num_workers = test_num_workers
+        self.test_max_samples = test_max_samples
         self.dataset_name = dataset_name
         self.shuffle = shuffle_data
+        self.train_loader_cfg = train_dataloader_cfg or {}
+        self.test_loader_cfg = test_dataloader_cfg or {}
         self.kwargs = kwargs
         self.load_data_module()
+
+    def _build_loader_kwargs(self, num_workers: int, loader_cfg: dict) -> dict:
+        """
+        Build DataLoader kwargs with safe defaults and worker-aware options.
+
+        :param num_workers: Number of workers for this loader.
+        :param loader_cfg: Optional loader configuration dictionary.
+        :return: Keyword arguments for torch.utils.data.DataLoader.
+        """
+        pin_memory = bool(loader_cfg.get("pin_memory", True))
+        persistent_workers = bool(loader_cfg.get("persistent_workers", True))
+        drop_last = bool(loader_cfg.get("drop_last", False))
+        prefetch_factor = loader_cfg.get("prefetch_factor", 4)
+
+        kwargs = {
+            "num_workers": num_workers,
+            "pin_memory": pin_memory,
+            "drop_last": drop_last,
+        }
+
+        if num_workers > 0:
+            kwargs["persistent_workers"] = persistent_workers
+            if prefetch_factor is not None:
+                kwargs["prefetch_factor"] = int(prefetch_factor)
+            # Avoid fork-after-thread deadlocks: timm/HF/OpenMP loaded in the
+            # parent leave locked mutexes that fork() would duplicate.
+            kwargs["multiprocessing_context"] = mp.get_context("forkserver")
+
+        return kwargs
 
     def setup(self, stage: str = None) -> None:
         """
@@ -55,12 +91,39 @@ class DataInterface(pl.LightningDataModule):
         if stage == "fit":
             self.train_dataset = self.instancialize(state="train")
             self.val_dataset = self.instancialize(state="val")
+            self.test_holdout_staining_dataset = self._maybe_build_holdout_staining_dataset()
         elif stage == "test":
-            self.test_dataset = self.instancialize(state="test")
+            # Organ-split "test" = same pool as val (regular slides, held-out organs).
+            self.test_dataset = self.instancialize(state="val")
+            self.test_holdout_staining_dataset = self._maybe_build_holdout_staining_dataset()
         else:
             raise ValueError(
                 f"Invalid stage provided: {stage}. Must be either train' or 'test'."
             )
+
+    def _maybe_build_holdout_staining_dataset(self):
+        """Instantiate the held-out-staining test dataset if the dataset config requests it.
+
+        Returns ``None`` when ``Data.holdout_stainings`` is empty or the dataset class
+        does not support this state (e.g. legacy image-based datasets).
+        """
+        holdout_cfg = self.kwargs.get("dataset_cfg", None)
+        stainings = None
+        if holdout_cfg is not None:
+            stainings = (
+                holdout_cfg.get("holdout_stainings", None)
+                if isinstance(holdout_cfg, dict)
+                else getattr(holdout_cfg, "holdout_stainings", None)
+            )
+        if not stainings:
+            return None
+        try:
+            return self.instancialize(state="test_holdout_staining")
+        except ValueError as e:
+            # Dataset may not support this state or the staining may not match.
+            import logging as _logging
+            _logging.warning(f"Skipping test_holdout_staining dataset: {e}")
+            return None
 
     def train_dataloader(self) -> DataLoader:
         """
@@ -68,12 +131,14 @@ class DataInterface(pl.LightningDataModule):
 
         :return: DataLoader yielding batches of training data.
         """
+        loader_kwargs = self._build_loader_kwargs(
+            self.train_num_workers, self.train_loader_cfg
+        )
         return DataLoader(
             self.train_dataset,
             batch_size=self.train_batch_size,
-            num_workers=self.train_num_workers,
             shuffle=self.shuffle,
-            pin_memory=True,
+            **loader_kwargs,
         )
 
     def val_dataloader(self):
@@ -82,44 +147,80 @@ class DataInterface(pl.LightningDataModule):
 
         :return: DataLoader yielding batches of validation data.
         """
+        loader_kwargs = self._build_loader_kwargs(
+            self.test_num_workers, self.test_loader_cfg
+        )
         return DataLoader(
             self.val_dataset,
-            batch_size=self.train_batch_size,
-            num_workers=self.train_num_workers,
+            batch_size=self.test_batch_size,
             shuffle=False,
-            pin_memory=True,
+            **loader_kwargs,
+        )
+
+    def test_holdout_staining_dataloader(self):
+        """
+        DataLoader for the held-out-staining test set (all patches of held-out stainings).
+
+        Returns ``None`` when no holdout was configured or the dataset was not built.
+        """
+        dataset = getattr(self, "test_holdout_staining_dataset", None)
+        if dataset is None:
+            return None
+        loader_kwargs = self._build_loader_kwargs(
+            self.test_num_workers, self.test_loader_cfg
+        )
+        return DataLoader(
+            dataset,
+            batch_size=self.test_batch_size,
+            shuffle=False,
+            **loader_kwargs,
         )
 
     def test_dataloader(self):
         """
-        Create DataLoader for testing dataset, ensuring a fixed number of samples.
+        Create DataLoader for testing dataset.
 
-        This loader concatenates the test dataset to itself multiple times and
-        truncates to exactly 10,000 samples, allowing repeated random sampling
-        from each WSI until the quota is met.
+        If `self.test_max_samples` is None or the dataset explicitly requests using
+        all test samples, the full test dataset is returned. Otherwise, this loader
+        concatenates and truncates to a fixed number of samples.
 
-        :return: DataLoader yielding 10,000 test samples without shuffling.
+        :return: DataLoader yielding test samples without shuffling.
         """
+        if self.test_max_samples is None or getattr(
+            self.test_dataset, "use_all_test_samples", False
+        ):
+            loader_kwargs = self._build_loader_kwargs(
+                self.test_num_workers, self.test_loader_cfg
+            )
+            return DataLoader(
+                self.test_dataset,
+                batch_size=self.test_batch_size,
+                shuffle=False,
+                **loader_kwargs,
+            )
+
         # Determine repetition factor to reach 10,000 samples
         L = len(self.test_dataset)
-        repeats = math.ceil(10_000 / L)
+        repeats = math.ceil(self.test_max_samples / L)
 
-        # Concatenate and truncate to 10,000 examples
+        # Concatenate and truncate to the requested number of examples
         long_ds = ConcatDataset([self.test_dataset] * repeats)
-        truncated = Subset(long_ds, list(range(10_000)))
+        truncated = Subset(long_ds, list(range(self.test_max_samples)))
 
-        # DataLoader configured to return exactly 10,000 random patches.
+        # DataLoader configured to return exactly `test_max_samples` random patches.
         # Each call to __getitem__ draws a fresh random patch from each WSI.
         # By concatenating the dataset multiple times, we ensure we sample
         # enough unique patches with different transformation parameters,
-        # then truncate to the first 10,000 examples.
+        # then truncate to the first requested number of examples.
 
+        loader_kwargs = self._build_loader_kwargs(
+            self.test_num_workers, self.test_loader_cfg
+        )
         return DataLoader(
             truncated,
             batch_size=self.test_batch_size,
             shuffle=False,
-            num_workers=self.test_num_workers,
-            pin_memory=True,
+            **loader_kwargs,
         )
 
     def load_data_module(self) -> None:
@@ -147,7 +248,17 @@ class DataInterface(pl.LightningDataModule):
         :param override_kwargs: Additional arguments to override defaults.
         :return: Instantiated dataset object.
         """
-        class_args = inspect.getargspec(self.data_module.__init__).args[1:]
+        signature = inspect.signature(self.data_module.__init__)
+        class_args = [
+            name
+            for name, param in signature.parameters.items()
+            if name != "self"
+            and param.kind
+            in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        ]
         inkeys = self.kwargs.keys()
         args1 = {}
         for arg in class_args:

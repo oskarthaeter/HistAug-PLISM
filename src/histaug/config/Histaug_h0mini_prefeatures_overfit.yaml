@@ -1,0 +1,88 @@
+General:
+    comment: overfit probe — deep MLP on h0mini prefeatures, single staining, tiny patch budget
+    seed: 2025
+    precision: bf16-mixed
+    matmul_precision: medium
+    cudnn_benchmark: true
+    epochs: 30
+    grad_acc: 1
+    server: train
+    log_path: logs/
+    strategy: "auto"
+    devices: 1
+    accelerator: "gpu"
+    ckpt_path_resume_training: null
+
+Data:
+    dataset_name: plism_pair_prefeatures_dataset
+    shuffle_data: True
+    features_root: /mnt/data/plismbench/features/h0_mini
+    organ_loc_csv: plism_organ_loc.csv
+    scanners: []
+    stainings: [GM]
+    train_split: 0.05
+    split_seed: 2025
+    test_max_samples: null
+
+    pairing:
+        allow_cross_staining: false
+        allow_same_scanner: true
+        symmetric: true
+        tiles_per_pair_per_epoch: 50
+
+    Transforms: null
+
+    train_dataloader:
+        batch_size: 256
+        num_workers: 8
+        persistent_workers: false
+        prefetch_factor: 2
+        pin_memory: true
+        drop_last: false
+
+    test_dataloader:
+        batch_size: 256
+        num_workers: 8
+        persistent_workers: false
+        prefetch_factor: 2
+        pin_memory: true
+        drop_last: false
+
+Foundation_model:
+    name: null
+    ckpt_path: null
+
+Model:
+    name: scanner_transfer_linear_model
+    input_dim: 768
+    hidden_dim: 4096
+    num_hidden_layers: 2
+    conditioning: [src_scanner, tgt_scanner]
+
+Optimizer:
+    name: AdamW
+    parameters:
+        lr: 1e-3
+        weight_decay: 0.0
+
+Scheduler:
+    name: LinearWarmupCosineAnnealingLR
+    parameters:
+        warmup_epochs: 5
+        T_max: 30
+        eta_min: 1e-5
+
+Loss:
+    base_loss: [CosineSimilarityLoss]
+    loss_weights: [1.0]
+    residual_penalty_weight: 0.0
+
+HistAug:
+    ckpt_path: null
+    aug_prob: 0.0
+
+Wandb:
+    project: HistAug-PLISM
+    run_name: h0mini-transfer-overfit  # set a short descriptive name before each run
+    group: scanner-transfer
+    tags: [h0-mini, overfit]

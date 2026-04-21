@@ -1,0 +1,94 @@
+General:
+    comment: 
+    seed: 2025
+    precision: bf16-mixed
+    matmul_precision: high
+    cudnn_benchmark: true
+    epochs: &epoch 1
+    grad_acc: 1
+    server: train # 'train' or 'test'
+    log_path: logs/
+    strategy: "auto"
+    devices: 1
+    accelerator: "gpu"
+    ckpt_path_resume_training: null # Path to a checkpoint to resume training from. Set to null to start training from scratch.
+Data:
+    dataset_name: plism_jpeg_dataset
+    shuffle_data: True
+    data_path: plism_jpeg # Root folder containing slide subfolders with JPEG tiles.
+    scanners: [GT450] # Optional scanner filter, e.g. [S60, GT450]. Empty means all scanners.
+    stainings: [] # Optional staining filter, e.g. [GMH, GIVH]. Empty means all stainings.
+    train_split: 0.8 # 80/20 train-test split, stratified by (staining, scanner) at slide level.
+    split_seed: 2025 # Seed for deterministic stratified split.
+    test_max_samples: null # null = evaluate on all test tiles (no truncation).
+    
+    Transforms:
+        transform_class: PatchAugmentation
+        parameters:
+            # rotation: 0.75 # Probability to apply a rotation
+            h_flip: 0.75 # Probability to apply a horizontal flip
+            v_flip: 0.75 # Probability to apply a vertical flip
+            # erosion: 0.75 # Probability to apply an erosion
+            # dilation: 0.75 # Probability to apply a dilation
+            # crop: 0.75 # Probability to apply a crop
+            gaussian_blur: 0.75 # Probability to apply gaussian blurring
+            hed: [-0.5, 0.5] # Range of HED transform parameters
+            hue: [-0.5, 0.5]  # Range of hue transform parameters
+            brightness: [-0.5, 0.5] # Range of brightness transform parameters
+            contrast: [-0.5, 0.5]  # Range of contrast transform parameters
+            saturation: [-0.5, 0.5]  # Range of saturation transform parameters
+            gamma: [-0.5, 0.5] # Range of gamma transform parameters
+
+    train_dataloader:
+        batch_size: 128 
+        num_workers: 16
+        persistent_workers: false
+        prefetch_factor: 4
+        pin_memory: true
+        drop_last: true
+
+    test_dataloader:
+        batch_size: 128
+        num_workers: 16
+        persistent_workers: false
+        prefetch_factor: 2
+        pin_memory: true
+        drop_last: false
+
+Foundation_model:
+    name: H0-MINI
+    ckpt_path: null # Path to pytorch_model.bin. If null, the default checkpoint will be used from Hugging Face cache (~/.cache).
+
+Model:
+    name: histaug_model
+    input_dim: 768
+    chunk_size: 12
+    depth: 12
+    num_heads: 4
+    mlp_ratio: 2
+    use_transform_pos_embeddings: true
+    positional_encoding_type: learnable
+
+Optimizer:
+    name: AdamW
+    parameters:
+        lr: 5e-4
+        weight_decay: 1e-5
+
+Scheduler:
+    name: null # No learning rate schedule
+
+    # Example of learning rate scheduler :  
+    # name: CosineAnnealingLR
+    # parameters:
+    #     T_max: 500
+    #     eta_min: 5e-4
+    #     last_epoch: -1
+Loss:
+    base_loss: MSELoss
+
+    # Example using combination of losses
+    # base_loss: [CosineSimilarityLoss, SmoothL1Loss]
+    # loss_weights: [1, 1]
+
+

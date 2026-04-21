@@ -1,0 +1,110 @@
+General:
+    comment: scanner-transfer (PLISM paired JPEG tiles)
+    seed: 2025
+    precision: bf16-mixed
+    matmul_precision: medium
+    cudnn_benchmark: true
+    epochs: 30
+    grad_acc: 1
+    server: train
+    log_path: logs/
+    strategy: "auto"
+    devices: 1
+    accelerator: "gpu"
+    ckpt_path_resume_training: null
+
+Data:
+    dataset_name: plism_pair_jpeg_dataset
+    shuffle_data: True
+    data_path: plism_jpeg
+    # Empty lists = all scanners / stainings present in the manifest.
+    scanners: []
+    stainings: []
+    train_split: 0.6
+    split_seed: 2025
+    test_max_samples: null
+
+    pairing:
+        allow_cross_staining: false   # Include cross-staining pairs as an additional transfer type.
+        allow_same_scanner: true    # Skip degenerate A=B scanner pairs.
+        symmetric: true              # Yield both (A->B) and (B->A).
+        tiles_per_pair_per_epoch: 128  # Virtual epoch size per slide-pair.
+
+    # Augmentations applied identically to A and B for diversity only (no conditioning).
+    Transforms:
+        transform_class: PatchAugmentation
+        parameters:
+            rotation: 0.75 # Probability to apply a rotation
+            h_flip: 0.75 # Probability to apply a horizontal flip
+            v_flip: 0.75 # Probability to apply a vertical flip
+            # erosion: 0.25 # Probability to apply an erosion
+            # dilation: 0.25 # Probability to apply a dilation
+            crop: 0.25 # Probability to apply a crop # make very weak
+            gaussian_blur: 0.5 # Probability to apply gaussian blurring
+            # hed: [-0.4, 0.4] # Range of HED transform parameters
+            # hue: [-0.4, 0.4]  # Range of hue transform parameters
+            # brightness: [-0.4, 0.4] # Range of brightness transform parameters
+            # contrast: [-0.4, 0.4]  # Range of contrast transform parameters
+            # saturation: [-0.4, 0.4]  # Range of saturation transform parameters
+            # gamma: [-0.4, 0.4] # Range of gamma transform parameters
+
+    train_dataloader:
+        batch_size: 256
+        num_workers: 48
+        persistent_workers: false
+        prefetch_factor: 2
+        pin_memory: true
+        drop_last: true
+
+    test_dataloader:
+        batch_size: 256
+        num_workers: 48
+        persistent_workers: false
+        prefetch_factor: 2
+        pin_memory: true
+        drop_last: false
+
+Foundation_model:
+    name: H0-MINI
+    ckpt_path: null
+
+Model:
+    name: scanner_transfer_linear_model
+    input_dim: 768
+    hidden_dim: 1024   # null = pure linear; set e.g. 1024 for 2-layer MLP
+    conditioning: [src_scanner, tgt_scanner]
+    # name: scanner_transfer_model
+    # input_dim: 768
+    # chunk_size: 12
+    # depth: 6
+    # num_heads: 4
+    # mlp_ratio: 2
+    # conditioning: [src_scanner, tgt_scanner, src_staining, tgt_staining]
+    # # scanner_vocab_size / staining_vocab_size are auto-filled by train.py from the
+    # # dataset's manifest after applying `Data.scanners` / `Data.stainings` filters.
+    # final_activation: Identity
+
+Optimizer:
+    name: AdamW
+    parameters:
+        lr: 1e-3
+        weight_decay: 1e-4
+
+Scheduler:
+    name: CosineAnnealingLR
+    parameters:
+        T_max: 30
+        eta_min: 1e-6
+
+Loss:
+    base_loss: [CosineSimilarityLoss, SmoothL1Loss]
+    loss_weights: [1, 1]
+
+# Held-out evaluation on SCORPION (different scanners, same staining).
+# Runs after training and at test time via run_scorpion_eval() in train.py.
+# foundation_model is inherited from the top-level Foundation_model section.
+Scorpion:
+    data_path: /mnt/data/plismbench/SCORPION/SCORPION_dataset
+    foundation_model: null   # null → uses top-level Foundation_model (H0-MINI)
+    scanner_name_map:
+        Philips: P           # SCORPION name → PLISM abbreviation

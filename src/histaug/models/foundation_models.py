@@ -6,7 +6,6 @@ from typing import Dict
 
 import timm
 import torch
-from conch.open_clip_custom import create_model_from_pretrained
 from torchvision import transforms
 from transformers import AutoModel
 from utils.constants import NormConstants
@@ -124,6 +123,15 @@ class CONCH(FoundationBackend):
         :param ckpt_path: Checkpoint path or None to use hub weights.
         :return: Model with forward bound to encode_image without contrast projection.
         """
+        try:
+            from conch.open_clip_custom import create_model_from_pretrained
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "The 'conch' package is required only for Foundation_model.name='CONCH'. "
+                "Install project dependencies (e.g. 'pip install -e .') or install CONCH "
+                "directly from https://github.com/Mahmoodlab/CONCH.git."
+            ) from e
+
         if ckpt_path is not None:
             model, preprocess = create_model_from_pretrained(
                 "conch_ViT-B-16", ckpt_path
@@ -275,6 +283,102 @@ class H_OPTIMUS_1(FoundationBackend):
             ),
             self.IMG_SIZE,
         )
+
+
+@register
+class H0_MINI(FoundationBackend):
+    NAME = "H0-MINI"
+    IMG_SIZE = 224
+    MEAN = (0.707223, 0.578729, 0.703617)
+    STD = (0.211883, 0.230117, 0.177517)
+
+    def _build_model(self, ckpt_path: str | None):
+        """
+        Build the H0-MINI vision transformer.
+
+        :param ckpt_path: Optional local checkpoint path. If provided, load from disk.
+        :return: Initialized model ready for feature extraction.
+        """
+        if ckpt_path is not None:
+            model = timm.create_model(
+                "hf-hub:bioptimus/H0-mini",
+                pretrained=False,
+                mlp_layer=timm.layers.SwiGLUPacked,
+                act_layer=torch.nn.SiLU,
+                dynamic_img_size=False,
+            )
+            model.load_state_dict(
+                torch.load(ckpt_path, map_location="cuda"), strict=True
+            )
+        else:
+            model = timm.create_model(
+                "hf-hub:bioptimus/H0-mini",
+                pretrained=True,
+                mlp_layer=timm.layers.SwiGLUPacked,
+                act_layer=torch.nn.SiLU,
+                dynamic_img_size=False,
+            )
+
+        # H0-mini can return token-level features [B, N, 768].
+        # HistAug expects one embedding vector per sample [B, 768].
+        _orig_forward = model.forward
+
+        def _forward_embedding(x: torch.Tensor) -> torch.Tensor:
+            out = _orig_forward(x)
+            if out.ndim == 3:
+                # Use CLS token as the slide-level representation.
+                return out[:, 0, :]
+            return out
+
+        model.forward = _forward_embedding
+        return model
+
+    def get_transform(self) -> transforms.Compose:
+        """
+        Preprocessing for H0-MINI (same as H-OPTIMUS-1).
+        """
+        return (
+            transforms.Compose(
+                [
+                    transforms.Resize(self.IMG_SIZE),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=self.MEAN, std=self.STD),
+                ]
+            ),
+            self.IMG_SIZE,
+        )
+
+
+@register
+class PHIKON(FoundationBackend):
+    NAME = "PHIKON"
+    IMG_SIZE = 224
+    # Phikon uses standard ImageNet normalization
+    MEAN = NormConstants.IMAGENET_MEAN.value
+    STD = NormConstants.IMAGENET_STD.value
+
+    def _build_model(self, ckpt_path: str | None):
+        """
+        Build Phikon (owkin/phikon) via the timm-compatible mirror at
+        1aurent/vit_base_patch16_224.owkin_pancancer.  With num_classes=0
+        timm returns the CLS token directly as (B, 768).
+        """
+        if ckpt_path is not None:
+            model = timm.create_model(
+                "hf-hub:1aurent/vit_base_patch16_224.owkin_pancancer",
+                pretrained=False,
+                num_classes=0,
+            )
+            model.load_state_dict(
+                torch.load(ckpt_path, map_location="cuda"), strict=True
+            )
+        else:
+            model = timm.create_model(
+                "hf-hub:1aurent/vit_base_patch16_224.owkin_pancancer",
+                pretrained=True,
+                num_classes=0,
+            )
+        return model
 
 
 @register

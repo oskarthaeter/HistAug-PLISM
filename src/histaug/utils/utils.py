@@ -2,7 +2,6 @@ import json
 import logging
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 from pathlib import Path
 from pprint import pformat
 from typing import List
@@ -10,8 +9,12 @@ from typing import List
 import yaml
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.listconfig import ListConfig
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import (
+    LearningRateMonitor,
+    ModelCheckpoint,
+    RichProgressBar,
+)
+from pytorch_lightning.loggers import CSVLogger, WandbLogger
 
 from utils.constants import TransformCategoryConstants
 
@@ -38,50 +41,76 @@ def read_yaml(fpath=None) -> DictConfig:
     return cfg
 
 
-def load_loggers(cfg) -> List[TensorBoardLogger]:
+def load_loggers(cfg) -> List[WandbLogger]:
     """
-    Set up TensorBoard logging directories and instantiate tensorboard loggers.
+    Set up the run directory and instantiate the W&B logger (train only).
 
-    The log path is formed as: cfg.General.log_path / <config_parent> / <config_stem>.
-    A subfolder 'tensorboard_logs' is used for the TensorBoardLogger.
+    The log path is formed as: cfg.General.log_path / <Wandb.run_name>.
+    Set Wandb.run_name in the config to a short descriptive name before each run.
+    If unset, falls back to the config file stem.
 
     :param cfg: Configuration object with attributes:
                 - General.log_path: Base directory for logs.
                 - config: Path string to the config file.
-    :return: List containing a single TensorBoardLogger instance.
+                - Wandb.run_name: Short descriptive run name (set before each run).
+                - Wandb.group: W&B group (e.g. "histaug" or "scanner-transfer").
+                - Wandb.tags: List of W&B tags (e.g. ["h0-mini"]).
+    :return: List of loggers.
     """
     base_log = Path(cfg.General.log_path)
     ensure_dir(base_log)
 
     config_path = Path(cfg.config)
-    version = config_path.stem  # automatically strips suffix
-    run_dir = base_log / config_path.parent.name / version
 
-    # Add the timestamp suffix (current date, minutes, and seconds)
-    if cfg.General.server == "train":
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = run_dir / f"{version}_{timestamp}"
+    wandb_cfg = getattr(cfg, "Wandb", None)
+    project = getattr(wandb_cfg, "project", "HistAug-PLISM") if wandb_cfg else "HistAug-PLISM"
+    run_name = (getattr(wandb_cfg, "run_name", None) if wandb_cfg else None) or config_path.stem
+    group = getattr(wandb_cfg, "group", None) if wandb_cfg else None
+    tags = list(getattr(wandb_cfg, "tags", None) or []) if wandb_cfg else []
+
+    run_dir = base_log / run_name
+
+    if cfg.General.server == "train" and run_dir.exists():
+        logger.warning(
+            f"Run directory already exists: {run_dir}. "
+            "Set a unique Wandb.run_name to avoid mixing run artifacts."
+        )
 
     ensure_dir(run_dir)
-
     cfg.log_path = str(run_dir)
-
     logger.info(f"Logs folder: {run_dir}")
 
     params_file_to_save = run_dir / "config_used.json"
-
     cfg_dict_to_save = OmegaConf.to_container(cfg, resolve=True)
-    # Save the dictionary to the JSON file
     with open(params_file_to_save, "w") as f:
         json.dump(cfg_dict_to_save, f, indent=2)
 
-    tb = TensorBoardLogger(
-        save_dir=str(run_dir / "tensorboard_logs"),
-        log_graph=False,
-        default_hp_metric=False,
+    resume_run_id = getattr(cfg.General, "wandb_run_id", None)
+    csv_logger = CSVLogger(save_dir=str(run_dir), name="", version="")
+
+    if cfg.General.server != "train":
+        if not resume_run_id:
+            return [csv_logger]
+        ckpt_override = getattr(cfg.General, "ckpt_path_override", None)
+        save_dir = str(Path(ckpt_override).parent) if ckpt_override else str(run_dir)
+        wb = WandbLogger(
+            project=project,
+            id=resume_run_id,
+            resume="must",
+            save_dir=save_dir,
+        )
+        return [wb, csv_logger]
+
+    wb = WandbLogger(
+        project=project,
+        name=run_name,
+        group=group,
+        tags=tags or None,
+        save_dir=str(run_dir),
+        config=cfg_dict_to_save,
     )
 
-    return [tb]
+    return [wb, csv_logger]
 
 
 # ---->load Callback
@@ -95,7 +124,7 @@ def load_callbacks(cfg):
                 - Scheduler.name: Name of the LR scheduler (optional).
     :return: List of instantiated callback objects.
     """
-    Mycallbacks = []
+    Mycallbacks = [RichProgressBar()]
 
     # Make output path
     output_path = cfg.log_path
@@ -166,6 +195,104 @@ def check_parameters_validity(transformation_params: dict | DictConfig) -> None:
 
         else:
             raise KeyError(f"Transformation '{k}' is not recognized.")
+
+
+def write_split_manifest(datamodule, log_dir, loggers=None) -> dict | None:
+    """Dump a deterministic description of the train/val/test_holdout_staining splits.
+
+    Writes ``<log_dir>/splits.json`` with slide membership, organ membership, per-split
+    counts, and vocabularies. If a W&B logger is passed, also logs summary scalars and
+    a per-slide assignment table so the run page shows the splits at a glance.
+
+    Silently no-ops when the underlying dataset does not expose ``describe_splits`` —
+    e.g. legacy image-based datasets — since the manifest is dataset-specific.
+
+    Returns the manifest dict, or ``None`` if skipped.
+    """
+    import json as _json
+
+    reference = (
+        getattr(datamodule, "train_dataset", None)
+        or getattr(datamodule, "test_dataset", None)
+        or getattr(datamodule, "val_dataset", None)
+    )
+    if reference is None or not hasattr(reference, "describe_splits"):
+        return None
+
+    manifest = reference.describe_splits()
+
+    # Enrich with per-split counts by asking each instantiated dataset for its summary.
+    counts: dict = {}
+    for attr, key in [
+        ("train_dataset", "train"),
+        ("val_dataset", "val"),
+        ("test_dataset", "val"),  # "test" dataset is the organ-split val pool
+        ("test_holdout_staining_dataset", "test_holdout_staining"),
+    ]:
+        ds = getattr(datamodule, attr, None)
+        if ds is None or not hasattr(ds, "current_split_summary"):
+            continue
+        summary = ds.current_split_summary()
+        counts.setdefault(key, {}).update(
+            {
+                "n_slides": summary["n_slides"],
+                "n_pairs": summary["n_pairs"],
+                "n_valid_patches": summary["n_valid_patches"],
+                "n_items_per_epoch": summary["n_items"],
+            }
+        )
+        if summary.get("valid_organs") is not None:
+            manifest.setdefault("organs", {})[key] = summary["valid_organs"]
+    manifest["counts"] = counts
+
+    log_dir_path = Path(log_dir)
+    ensure_dir(log_dir_path)
+    manifest_path = log_dir_path / "splits.json"
+    with manifest_path.open("w") as f:
+        _json.dump(manifest, f, indent=2, default=str)
+    logger.info(f"Wrote split manifest to {manifest_path}")
+
+    wb = None
+    if loggers:
+        for lg in loggers:
+            if isinstance(lg, WandbLogger):
+                wb = lg.experiment
+                break
+
+    if wb is not None:
+        try:
+            import wandb
+
+            scalars: dict = {}
+            for split_name, c in counts.items():
+                for metric, value in c.items():
+                    scalars[f"split/{split_name}/{metric}"] = value
+            scalars["split/holdout_stainings"] = ", ".join(
+                manifest["holdout_stainings"]
+            ) or "(none)"
+            wb.summary.update(scalars)
+
+            rows: list[list] = []
+            for split_name in ("train", "val", "test_holdout_staining"):
+                for slide in manifest["slides"].get(split_name, []):
+                    rows.append(
+                        [
+                            slide["slide_id"],
+                            slide["staining"],
+                            slide["scanner"],
+                            split_name,
+                        ]
+                    )
+            if rows:
+                table = wandb.Table(
+                    columns=["slide_id", "staining", "scanner", "split"],
+                    data=rows,
+                )
+                wb.log({"splits/slides": table}, commit=False)
+        except Exception as e:
+            logger.warning(f"Could not log split manifest to W&B: {e}")
+
+    return manifest
 
 
 def print_run_summary(cfg, color_mode: str = "auto") -> None:

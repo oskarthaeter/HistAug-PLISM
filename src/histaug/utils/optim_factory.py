@@ -3,6 +3,23 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 
 
+def _make_warmup_cosine_scheduler(
+    optimizer: optim.Optimizer,
+    warmup_epochs: int,
+    T_max: int,
+    eta_min: float = 1e-6,
+) -> lr_scheduler.SequentialLR:
+    warmup = lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_epochs
+    )
+    cosine = lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=T_max - warmup_epochs, eta_min=eta_min
+    )
+    return lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs]
+    )
+
+
 def create_optimizer(optimizer_config: dict, model: nn.Module) -> optim.Optimizer:
     """
     Create an optimizer for model parameters based on configuration.
@@ -41,6 +58,8 @@ def create_scheduler(
     if sched_name is None:
         return None
     params = scheduler_config.get("parameters", {})
+    if sched_name == "LinearWarmupCosineAnnealingLR":
+        return _make_warmup_cosine_scheduler(optimizer, **params)
     if not hasattr(lr_scheduler, sched_name):
         raise ValueError(
             f"Scheduler {sched_name} does not exist in torch.optim.lr_scheduler."

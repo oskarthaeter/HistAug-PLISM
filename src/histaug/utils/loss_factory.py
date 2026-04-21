@@ -54,6 +54,19 @@ class CombinedLoss(nn.Module):
             total_loss = total_loss + weight * loss_module(input_tensor, target)
         return total_loss
 
+    def forward_with_components(
+        self, input_tensor: torch.Tensor, target: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        components: dict[str, torch.Tensor] = {}
+        total_loss = torch.zeros(
+            (), dtype=input_tensor.dtype, device=input_tensor.device
+        )
+        for loss_module, weight in zip(self.losses, self.weights):
+            val = weight * loss_module(input_tensor, target)
+            components[type(loss_module).__name__] = val
+            total_loss = total_loss + val
+        return total_loss, components
+
 
 def _resolve_loss(name: str):
     if hasattr(nn, name):
@@ -65,9 +78,15 @@ def _resolve_loss(name: str):
     )
 
 
-def create_loss(loss_config: dict) -> nn.Module:
+def create_loss(loss_config) -> nn.Module:
     base_losses = loss_config.get("base_loss")
     loss_weights = loss_config.get("loss_weights")
+
+    # OmegaConf ListConfig is not a list/tuple — normalise to plain Python types.
+    if base_losses is not None and not isinstance(base_losses, (str, list, tuple)):
+        base_losses = list(base_losses)
+    if loss_weights is not None and not isinstance(loss_weights, (list, tuple)):
+        loss_weights = list(loss_weights)
 
     if isinstance(base_losses, (list, tuple)):
         num_losses = len(base_losses)
