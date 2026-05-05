@@ -1,0 +1,98 @@
+General:
+    comment: scanner-transfer with pre-extracted Virchow2 features — tgt_scanner conditioning only, HR staining category excluded from training
+    seed: 2025
+    precision: bf16-mixed
+    matmul_precision: medium
+    cudnn_benchmark: true
+    epochs: 10
+    grad_acc: 1
+    server: train
+    log_path: logs/
+    strategy: "auto"
+    devices: 1
+    accelerator: "gpu"
+    ckpt_path_resume_training: null
+
+Data:
+    dataset_name: plism_pair_prefeatures_dataset
+    shuffle_data: True
+    features_root: /mnt/data/plismbench/features/virchow2
+    feature_dim: 2560
+    organ_loc_csv: plism_organ_loc.csv  # organ-based train/test split (train on 80% of organs)
+    scanners: []
+    # HR category excluded.
+    stainings: ["GIV", "GIVH", "GM", "GMH", "GV", "GVH", "KR", "KRH", "LM", "LMH", "MY", "HRH"]
+    # GVH reserved as held-out test staining (cross-scanner transfer, never seen during training).
+    holdout_stainings: ["GVH"]
+    train_split: 0.8  # fraction of organs used for training
+    split_seed: 2025
+    test_max_samples: null
+
+    pairing:
+        allow_cross_staining: false
+        allow_same_scanner: true
+        symmetric: true
+        tiles_per_pair_per_epoch: 1.0  # fraction of train patches per pair per epoch (1.0 = full pass)
+
+    Transforms: null  # No image augmentations — features are pre-extracted
+
+    train_dataloader:
+        batch_size: 1024
+        num_workers: 8
+        persistent_workers: false
+        prefetch_factor: 4
+        pin_memory: true
+        drop_last: true
+
+    test_dataloader:
+        batch_size: 1024
+        num_workers: 8
+        persistent_workers: false
+        prefetch_factor: 2
+        pin_memory: true
+        drop_last: false
+
+Foundation_model:
+    name: null  # Features are pre-extracted — foundation model is not loaded
+    ckpt_path: null
+
+Model:
+  name: scanner_transfer_layer_model
+  input_dim: 2560
+  hidden_dims: [128, 64]
+  conditioning: [tgt_scanner]
+  use_spectral_norm: true
+  spectral_norm_all: true
+  alpha: 0.1  # residual scaling factor (learnable)
+
+Optimizer:
+    name: AdamW
+    parameters:
+        lr: 1e-4
+        weight_decay: 1e-3
+
+Scheduler:
+    name: LinearWarmupCosineAnnealingLR
+    parameters:
+        warmup_epochs: 2
+        T_max: 10
+        eta_min: 1e-6
+
+Loss:
+    base_loss: [CosineSimilarityLoss, SmoothL1Loss]
+    loss_weights: [0.7, 0.3]
+    residual_penalty_weight: 0.01  # penalise ||pred_b - feats_a||² to limit over-correction
+
+# Held-out evaluation on SCORPION using pre-extracted features (no image loading).
+Scorpion:
+    features_root: /mnt/data/plismbench/features/scorpion/virchow2
+    scanner_name_map:
+        DP200: S210         # SCORPION name -> PLISM scanner surrogate in this checkpoint vocab
+        P1000: S360         # SCORPION name -> PLISM scanner surrogate in this checkpoint vocab
+        Philips: P           # SCORPION name -> PLISM abbreviation
+
+Wandb:
+    project: HistAug-PLISM
+    run_name: virchow2-transfer-bottleneck-tgt_spectral_norm_all_no_HR_capped_alpha
+    group: scanner-transfer
+    tags: [virchow2, tgt-only, no-HR]

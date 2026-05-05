@@ -1,0 +1,103 @@
+General:
+    comment: scanner-transfer with pre-extracted Virchow2 features — tgt_scanner conditioning only
+    seed: 2025
+    precision: bf16-mixed
+    matmul_precision: medium
+    cudnn_benchmark: true
+    epochs: 15
+    grad_acc: 1
+    server: train
+    log_path: logs/
+    strategy: "auto"
+    devices: 1
+    accelerator: "gpu"
+    ckpt_path_resume_training: null
+
+Data:
+    dataset_name: plism_pair_prefeatures_dataset
+    shuffle_data: True
+    features_root: /mnt/data/plismbench/features/virchow2
+    feature_dim: 2560
+    organ_loc_csv: plism_organ_loc.csv  # organ-based train/test split (train on 80% of organs)
+    # Empty lists = all scanners / stainings present in the features root.
+    scanners: []
+    stainings: []
+    # Stainings removed from train/val and reserved as a dedicated held-out test set
+    # (cross-scanner transfer within the held-out staining, never seen during training).
+    holdout_stainings: ["GVH"]
+    train_split: 0.8  # fraction of organs used for training
+    split_seed: 2025
+    test_max_samples: null
+
+    pairing:
+        allow_cross_staining: false
+        allow_same_scanner: true
+        symmetric: true
+        tiles_per_pair_per_epoch: 0.5  # fraction of train patches per pair per epoch (1.0 = full pass)
+
+    Transforms: null  # No image augmentations — features are pre-extracted
+
+    train_dataloader:
+        batch_size: 1024
+        num_workers: 8
+        persistent_workers: false
+        prefetch_factor: 4
+        pin_memory: true
+        drop_last: true
+
+    test_dataloader:
+        batch_size: 1024
+        num_workers: 8
+        persistent_workers: false
+        prefetch_factor: 2
+        pin_memory: true
+        drop_last: false
+
+Foundation_model:
+    name: null  # Features are pre-extracted — foundation model is not loaded
+    ckpt_path: null
+
+Model:
+    name: scanner_transfer_linear_model
+    input_dim: 2560
+    hidden_dim: 4096
+    num_hidden_layers: 2
+    conditioning: [tgt_scanner]
+
+Optimizer:
+    name: AdamW
+    parameters:
+        lr: 1e-4
+        weight_decay: 1e-3
+
+Scheduler:
+    name: LinearWarmupCosineAnnealingLR
+    parameters:
+        warmup_epochs: 3
+        T_max: 15
+        eta_min: 1e-6
+
+Loss:
+    base_loss: [CosineSimilarityLoss, SmoothL1Loss, MSELoss]
+    loss_weights: [0.5, 0.25, 0.25]
+    residual_penalty_weight: 0.01  # penalise ||pred_b - feats_a||² to limit over-correction
+
+# Frozen HistAug conditioned model for feature-space augmentation of feat_a during training.
+# Set ckpt_path to the best checkpoint from Histaug_phikon_conditioned training.
+# HistAug:
+#     ckpt_path: /workspaces/HistAug-PLISM/src/histaug/logs/config/Histaug_virchow2_conditioned/Histaug_virchow2_conditioned_20260420_085539/last.ckpt
+#     aug_prob: 0.5    # probability of augmenting each sample's feat_a per step
+
+# Held-out evaluation on SCORPION using pre-extracted features (no image loading).
+Scorpion:
+    features_root: /mnt/data/plismbench/features/scorpion/virchow2
+    scanner_name_map:
+        DP200: S210         # SCORPION name -> PLISM scanner surrogate in this checkpoint vocab
+        P1000: S360         # SCORPION name -> PLISM scanner surrogate in this checkpoint vocab
+        Philips: P           # SCORPION name → PLISM abbreviation
+
+Wandb:
+    project: HistAug-PLISM
+    run_name: virchow2-transfer-tgt  # set a short descriptive name before each run
+    group: scanner-transfer
+    tags: [virchow2, tgt-only]

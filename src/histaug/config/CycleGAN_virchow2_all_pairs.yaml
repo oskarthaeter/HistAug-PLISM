@@ -1,0 +1,56 @@
+# CycleGAN feature-space scanner translation — Virchow2, all scanner pairs.
+# ONE shared generator G(x, tgt_id) handles every source→target direction.
+# Only the target scanner is needed at inference — no source identity required.
+#
+# Features are read via memory mapping directly from the extraction output;
+# no intermediate feature tensors are stored on disk.
+#
+# Prepare metadata (run once — computes split indices and norm stats, no data copying):
+#   python -m histaug.cyclegan_features.prepare_data \
+#       --features_root /mnt/data/plismbench/features/virchow2 \
+#       --all_pairs \
+#       --output_dir /mnt/data/plismbench/features/CycleGAN/virchow2_all_pairs_meta
+#
+# Train:
+#   python -m histaug.cyclegan_features.train \
+#       --config src/histaug/config/CycleGAN_virchow2_all_pairs.yaml
+
+paired_data: /mnt/data/plismbench/features/CycleGAN/virchow2_all_pairs_meta/train.pt
+val_data:    /mnt/data/plismbench/features/CycleGAN/virchow2_all_pairs_meta/val.pt
+feature_dim: 2560
+
+# scanner_vocab is read from the metadata file automatically.
+# scanner_vocab: [AT2, GT450, P, S210, S360, S60, SQ]
+
+# Bottleneck generator with FiLM conditioning on target scanner one-hot.
+discriminator_hidden_dim: 512
+hidden_dims: [128, 64]
+use_film: true
+
+batch_size: 1024
+epochs: 100
+lr: 2.0e-4
+lr_d: 5.0e-5
+lr_decay_epochs: 50
+beta1: 0.5
+beta2: 0.999
+
+lambda_cyc: 10.0
+lambda_idt: 5.0
+lambda_paired: 10.0
+lambda_adv: 0.1
+loss_alpha: 0.5   # 0.5 * L1 + 0.5 * (1 - cosine)
+lambda_coral: 0.0  # CORAL covariance alignment (fake vs real)
+lambda_rel: 0.0    # relational pairwise-similarity structure preservation
+
+replay_buffer_size: 50
+seed: 2025
+num_workers: 8
+save_interval: 10
+log_interval: 5
+output_dir: /workspaces/HistAug-PLISM/src/histaug/logs/cyclegan/virchow2_all_pairs
+
+wandb_project: HistAug-PLISM
+wandb_run_name: virchow2-cyclegan-all
+wandb_group: CycleGAN
+wandb_tags: [virchow2, tgt-only, bottleneck]

@@ -16,7 +16,7 @@ from utils.organ_split import (
 
 class PlismPairPrefeaturesDataset(data.Dataset):
     """
-    Paired scanner-transfer dataset backed by pre-extracted H0-mini features.
+    Paired scanner-transfer dataset backed by pre-extracted feature arrays.
 
     Loads .npy feature files from a features root directory. Each directory
     corresponds to one (staining, scanner) combination and contains a single
@@ -39,7 +39,6 @@ class PlismPairPrefeaturesDataset(data.Dataset):
     """
 
     N_COORD_COLS = 3
-    FEATURE_DIM = 768
 
     def __init__(
         self,
@@ -85,7 +84,9 @@ class PlismPairPrefeaturesDataset(data.Dataset):
         self.symmetric = bool(self._cfg_get(pairing_cfg, "symmetric", True))
         # Raw value — may be a fraction (0, 1] or an absolute integer count (> 1).
         # Resolved to an integer after valid_row_indices is known (see end of __init__).
-        self._tiles_raw = float(self._cfg_get(pairing_cfg, "tiles_per_pair_per_epoch", 0.5))
+        self._tiles_raw = float(
+            self._cfg_get(pairing_cfg, "tiles_per_pair_per_epoch", 0.5)
+        )
         if self._tiles_raw <= 0:
             raise ValueError("`pairing.tiles_per_pair_per_epoch` must be > 0")
 
@@ -155,15 +156,30 @@ class PlismPairPrefeaturesDataset(data.Dataset):
                 "broaden scanner/staining selection."
             )
 
-        # Determine patch count from a sample file and validate feature width.
+        # Determine patch count from a sample file and resolve feature width.
         sample_path = slides_all[0]["features_path"]
         sample_arr = np.load(sample_path, mmap_mode="r")
         self.n_patches: int = sample_arr.shape[0]
-        expected_cols = self.N_COORD_COLS + self.FEATURE_DIM
+        if sample_arr.shape[1] <= self.N_COORD_COLS:
+            raise ValueError(
+                f"{sample_path} has {sample_arr.shape[1]} columns, expected > "
+                f"{self.N_COORD_COLS} (coord columns only is invalid)."
+            )
+
+        configured_feature_dim = self._cfg_get(dataset_cfg, "feature_dim", None)
+        if configured_feature_dim is None:
+            self.feature_dim = int(sample_arr.shape[1] - self.N_COORD_COLS)
+        else:
+            self.feature_dim = int(configured_feature_dim)
+            if self.feature_dim <= 0:
+                raise ValueError("`Data.feature_dim` must be a positive integer.")
+
+        expected_cols = self.N_COORD_COLS + self.feature_dim
         if sample_arr.shape[1] < expected_cols:
             raise ValueError(
                 f"{sample_path} has {sample_arr.shape[1]} columns, "
-                f"expected >= {expected_cols} (3 coord + {self.FEATURE_DIM} features)"
+                f"expected >= {expected_cols} (3 coord + {self.feature_dim} features). "
+                "Check `Data.feature_dim` for this config."
             )
 
         # Per-worker cache of memory-mapped arrays (populated lazily in __getitem__).
@@ -194,6 +210,7 @@ class PlismPairPrefeaturesDataset(data.Dataset):
             )
         else:
             import warnings
+
             if state in ("train", "val"):
                 warnings.warn(
                     "`organ_loc_csv` not set: train and val will sample from the same "
@@ -207,7 +224,9 @@ class PlismPairPrefeaturesDataset(data.Dataset):
         # Resolve tiles_per_pair_per_epoch: fraction of train patch pool → int count.
         n_train_patches = len(self.valid_row_indices)
         if 0 < self._tiles_raw <= 1.0:
-            self.tiles_per_pair_per_epoch = max(1, round(self._tiles_raw * n_train_patches))
+            self.tiles_per_pair_per_epoch = max(
+                1, round(self._tiles_raw * n_train_patches)
+            )
         else:
             self.tiles_per_pair_per_epoch = int(self._tiles_raw)
 
@@ -238,7 +257,11 @@ class PlismPairPrefeaturesDataset(data.Dataset):
 
     def current_split_summary(self) -> Dict:
         """Summary of the dataset instance's current state (slide pool + patch pool)."""
-        slides_in_pool = self._holdout_slides if self.state == "test_holdout_staining" else self._regular_slides
+        slides_in_pool = (
+            self._holdout_slides
+            if self.state == "test_holdout_staining"
+            else self._regular_slides
+        )
         return {
             "state": self.state,
             "n_slides": len(slides_in_pool),
@@ -246,10 +269,18 @@ class PlismPairPrefeaturesDataset(data.Dataset):
             "n_valid_patches": len(self.valid_row_indices),
             "n_items": len(self),
             "slides": [
-                {"slide_id": s["slide_id"], "staining": s["staining"], "scanner": s["scanner"]}
-                for s in sorted(slides_in_pool, key=lambda s: (s["staining"], s["scanner"]))
+                {
+                    "slide_id": s["slide_id"],
+                    "staining": s["staining"],
+                    "scanner": s["scanner"],
+                }
+                for s in sorted(
+                    slides_in_pool, key=lambda s: (s["staining"], s["scanner"])
+                )
             ],
-            "valid_organs": list(self.valid_organs) if self.valid_organs is not None else None,
+            "valid_organs": (
+                list(self.valid_organs) if self.valid_organs is not None else None
+            ),
         }
 
     def describe_splits(self, organ_loc_csv: Optional[str] = None) -> Dict:
@@ -292,6 +323,7 @@ class PlismPairPrefeaturesDataset(data.Dataset):
 
         return {
             "features_root": str(self.features_root),
+            "feature_dim": self.feature_dim,
             "split_seed": self.split_seed,
             "train_fraction": self.train_fraction,
             "holdout_stainings": sorted(self.holdout_stainings),
@@ -362,7 +394,7 @@ class PlismPairPrefeaturesDataset(data.Dataset):
             self._feature_cache[key] = np.load(features_path, mmap_mode="r")
         arr = self._feature_cache[key]
         feat = arr[
-            row_idx, self.N_COORD_COLS : self.N_COORD_COLS + self.FEATURE_DIM
+            row_idx, self.N_COORD_COLS : self.N_COORD_COLS + self.feature_dim
         ].copy()
         return torch.from_numpy(feat)
 

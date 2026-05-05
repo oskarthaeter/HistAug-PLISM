@@ -205,6 +205,11 @@ class ModelInterface(pl.LightningModule):
             else getattr(loss_cfg, "residual_penalty_weight", 0.0)
         )
 
+        # Per-group delta ratio (||pred - x|| / ||x||) for scanner/staining breakdown
+        self.pair_delta_ratio: dict[str, dict[str, list[float]]] = {
+            phase: {} for phase in ("train", "val", "test")
+        }
+
         # Per (src_scanner_idx, tgt_scanner_idx) cosine tracking for heatmaps
         self.pair_scanner_cos: dict[str, dict[tuple[int, int], list[float]]] = {
             phase: {} for phase in ("val", "test")
@@ -220,6 +225,7 @@ class ModelInterface(pl.LightningModule):
 
         # torch.compile state (fit-stage only)
         self._models_compiled: bool = False
+        self._pair_input_dim_checked: bool = False
 
     def setup(self, stage: str) -> None:
         """Compile model components for training when requested via config."""
@@ -580,6 +586,10 @@ class ModelInterface(pl.LightningModule):
             else:
                 feats_a, feats_b = img_a, img_b
 
+            # Fail fast with an actionable message when config input_dim does not
+            # match the actual pre-extracted feature dimensionality.
+            self._validate_pair_input_dim(feats_a)
+
             # Feature-space augmentation via frozen HistAug (training only)
             if (
                 self.histaug_augmentor is not None
@@ -664,6 +674,9 @@ class ModelInterface(pl.LightningModule):
             cos_pred = F.cosine_similarity(pred_b, feats_b)
             cos_ab = F.cosine_similarity(feats_a, feats_b)
             cos_id = F.cosine_similarity(pred_id, feats_a)
+            delta_ratio = (pred_b - feats_a).norm(dim=1) / (
+                feats_a.norm(dim=1) + 1e-8
+            )
 
         if phase == "test":
             cos_cpu = cos_pred.detach().float().cpu()
@@ -726,6 +739,21 @@ class ModelInterface(pl.LightningModule):
             #         cat = _staining_to_category(self.id_to_staining[src_st_list[i]])
             #         group_dict.setdefault(f"stain_{cat}", []).append(cos_cpu[i].item())
 
+        # Per-scanner and per-staining delta ratio accumulation (all phases)
+        ratio_cpu = delta_ratio.detach().float().cpu()
+        ratio_dict = self.pair_delta_ratio[phase]
+        if self.id_to_scanner:
+            src_sc_list = src_scanner.cpu().tolist()
+            tgt_sc_list = tgt_scanner.cpu().tolist()
+            for i in range(bsz):
+                r = ratio_cpu[i].item()
+                ratio_dict.setdefault(
+                    f"src_scanner_{self.id_to_scanner[src_sc_list[i]]}", []
+                ).append(r)
+                ratio_dict.setdefault(
+                    f"tgt_scanner_{self.id_to_scanner[tgt_sc_list[i]]}", []
+                ).append(r)
+
         self.losses[phase].append(batch_loss.detach())
         if phase == "train":
             self.log(
@@ -737,6 +765,36 @@ class ModelInterface(pl.LightningModule):
                 logger=True,
             )
         return batch_loss
+
+    def _validate_pair_input_dim(self, feats_a: torch.Tensor) -> None:
+        """Validate scanner-transfer feature dim against model config once per run."""
+        if self._pair_input_dim_checked:
+            return
+
+        cfg_input_dim = None
+        model_input_dim = None
+
+        try:
+            cfg_input_dim = int(getattr(self.hparams.model, "input_dim"))
+        except (TypeError, ValueError, AttributeError):
+            cfg_input_dim = None
+
+        model_input_dim = getattr(self.model, "input_dim", None)
+        if model_input_dim is not None:
+            model_input_dim = int(model_input_dim)
+
+        actual_dim = int(feats_a.shape[-1])
+        expected_dim = model_input_dim if model_input_dim is not None else cfg_input_dim
+
+        if expected_dim is not None and actual_dim != expected_dim:
+            raise RuntimeError(
+                "Feature/model dimension mismatch in scanner-transfer step: "
+                f"batch feature dim={actual_dim}, model input_dim={expected_dim}. "
+                "For pre-extracted features, set `Model.input_dim` to the actual "
+                "feature width (typically 768 for current prefeatures exports)."
+            )
+
+        self._pair_input_dim_checked = True
 
     def _log_scanner_heatmap(self, phase: str, log_prefix: str) -> None:
         """Build scanner-pair cosine heatmaps (pred + origtrans) and log them to wandb.
@@ -976,6 +1034,16 @@ class ModelInterface(pl.LightningModule):
         for key, values in self.pair_group_cos[phase].items():
             metrics[f"{log_phase}/cos_{key}"] = sum(values) / len(values)
         self.pair_group_cos[phase].clear()
+
+        # Residual scaling parameter alpha (if the model exposes it)
+        alpha_param = getattr(getattr(self, "model", None), "alpha", None)
+        if alpha_param is not None:
+            metrics[f"{log_phase}/alpha"] = float(alpha_param.item())
+
+        # Per-scanner and per-staining delta ratio
+        for key, values in self.pair_delta_ratio[phase].items():
+            metrics[f"{log_phase}/delta_ratio_{key}"] = sum(values) / len(values)
+        self.pair_delta_ratio[phase].clear()
 
         # Scanner-pair heatmaps (val/test only, requires scanner vocab)
         if (

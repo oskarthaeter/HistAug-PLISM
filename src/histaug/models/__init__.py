@@ -1,2 +1,4 @@
 from .histaug_model import HistaugModel
 from .model_interface import ModelInterface
+from .scanner_transfer_bottleneck_model import ScannerTransferBottleneckModel
+from .scanner_transfer_layer_model import ScannerTransferLayerModel

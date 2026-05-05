@@ -1,0 +1,51 @@
+# Experiment 2: Delayed adversarial pressure (lambda_adv ramp).
+# lambda_adv ramps linearly from 0 to 0.1 over the first 15 epochs,
+# then holds at 0.1 for epochs 16-30. The generator has 15 epochs to
+# converge on the paired + cycle + identity losses before the discriminator
+# applies full pressure. Also includes grad clipping and a real replay buffer.
+
+paired_data: /mnt/data/plismbench/features/CycleGAN/virchow2_all_pairs_meta/train.pt
+val_data:    /mnt/data/plismbench/features/CycleGAN/virchow2_all_pairs_meta/val.pt
+feature_dim: 2560
+
+filter_scanners: [GT450, P, S360, SQ]
+
+discriminator_hidden_dim: 64
+discriminator_dropout: 0.3
+discriminator_use_spectral_norm: true
+hidden_dims: [512, 256]
+use_film: true
+
+batch_size: 256
+epochs: 30
+lr: 2.0e-4
+lr_d: 1.0e-5
+lr_decay_epochs: 10
+beta1: 0.5
+beta2: 0.999
+
+lambda_cyc: 5.0
+lambda_idt: 0.5
+lambda_paired: 10.0
+lambda_adv: 0.1          # target; ramped from 0 over lambda_adv_ramp_epochs
+loss_alpha: 0.2
+loss_delta: 0.5
+lambda_coral: 0.05
+lambda_rel: 0.1
+
+# Stabilization.
+grad_clip_norm: 1.0
+lambda_adv_ramp_epochs: 15   # ramp lambda_adv from 0 → 0.1 over first 15 epochs
+replay_buffer_size: 50
+
+data_fraction: 0.10
+seed: 2025
+num_workers: 8
+save_interval: null
+log_interval: 1
+output_dir: /workspaces/HistAug-PLISM/src/histaug/logs/cyclegan/virchow2_limited_advRamp
+
+wandb_project: HistAug-PLISM
+wandb_run_name: virchow2-cyclegan-limited-advRamp
+wandb_group: CycleGAN
+wandb_tags: [virchow2, tgt-only, film, GT450-P-S360-SQ, grad-clip, adv-ramp]

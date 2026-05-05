@@ -40,13 +40,21 @@ class ScannerTransferLinearModel(nn.Module):
         self.scanner_vocab_size = scanner_vocab_size
         self.staining_vocab_size = staining_vocab_size
 
-        self.conditioning = conditioning if conditioning is not None else ALL_CONDITIONING
+        self.conditioning = (
+            conditioning if conditioning is not None else ALL_CONDITIONING
+        )
         unknown = set(self.conditioning) - VALID_CONDITIONING
         if unknown:
-            raise ValueError(f"Unknown conditioning signals: {unknown}. Valid: {VALID_CONDITIONING}")
+            raise ValueError(
+                f"Unknown conditioning signals: {unknown}. Valid: {VALID_CONDITIONING}"
+            )
 
         cond_dim = sum(
-            scanner_vocab_size if s in ("src_scanner", "tgt_scanner") else staining_vocab_size
+            (
+                scanner_vocab_size
+                if s in ("src_scanner", "tgt_scanner")
+                else staining_vocab_size
+            )
             for s in self.conditioning
         )
         joined_dim = input_dim + cond_dim

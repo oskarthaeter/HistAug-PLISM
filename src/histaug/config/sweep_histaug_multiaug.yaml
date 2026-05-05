@@ -1,0 +1,41 @@
+# Config for multi-augmentation latent sweep (HED + saturation + brightness)
+# Run with:
+#   python src/histaug/scripts/sweep_histaug_hed_transfer.py \
+#       --config src/histaug/config/sweep_histaug_multiaug.yaml
+
+features_root: /mnt/data/plismbench/features/virchow2
+model_id: sofieneb/histaug-virchow2
+output_dir: src/histaug/logs/aug_sweep_virchow2_detailed_v2
+
+device: cuda
+batch_size: 16384
+max_patches_per_pair: 1
+seed: 2026
+embedding_dim: null
+compile_model: True
+
+allow_cross_staining: false
+allow_same_scanner: false
+symmetric: true
+
+# Optional allowlists. Use [] for all.
+scanners: [P, S360]
+stainings: [GV]
+
+separate_by_staining: true
+example_tile_path: /workspaces/HistAug-PLISM/plism_jpeg/GIV_P_to_GMH_S60.tif/00000066__e1af80860b__tile_16_104_129.jpg
+example_grid_size: 2
+example_num_tiles: 1
+
+sweep:
+  transforms:
+    hed:
+      values: [-0.40, -0.30, -0.20, -0.12, -0.08, -0.04, 0.00, 0.04, 0.08, 0.12, 0.20, 0.30, 0.40]
+    saturation:
+      values: [-0.20, -0.15, -0.10, -0.05, 0.00, 0.05, 0.10, 0.15, 0.20]
+    brightness:
+      values: [-0.20, -0.15, -0.10, -0.05, 0.00, 0.05, 0.10, 0.15, 0.20]
+    contrast:
+      values: [-0.20, -0.15, -0.10, -0.05, 0.00, 0.05, 0.10, 0.15, 0.20]
+    hue:
+      values: [-0.20, -0.15, -0.10, -0.05, 0.00, 0.05, 0.10, 0.15, 0.20]

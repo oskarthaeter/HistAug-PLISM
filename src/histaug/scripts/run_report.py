@@ -619,7 +619,7 @@ def build_run_info_page(
 # Scanner heatmaps (all phases on one page)
 # ---------------------------------------------------------------------------
 
-_CELL = 0.54  # inches per scanner cell (about 25% smaller)
+_CELL = 0.70  # inches per scanner cell for larger, easier-to-read heatmaps
 
 
 def _draw_heatmap(
@@ -629,15 +629,24 @@ def _draw_heatmap(
     col_names: list[str],
     title: str,
     vmin: float,
+    force_square: bool,
 ) -> None:
     n_rows = len(row_names)
     n_cols = len(col_names)
+
+    # Keep cell size consistent across panels: width scales with n_cols (via gridspec
+    # width ratios) and box aspect sets height from n_rows.
+    if force_square:
+        ax.set_box_aspect(1.0)
+    else:
+        ax.set_box_aspect(n_rows / max(n_cols, 1))
+
     im = ax.imshow(
         mat,
         cmap=CMAP_PRED,
         vmin=vmin,
         vmax=1.0,
-        aspect="auto",
+        aspect="equal",
         interpolation="nearest",
     )
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -682,29 +691,34 @@ def build_scanner_heatmaps_page(
     # Use the largest N to size the figure; all phases should share the same
     # scanner vocabulary, but we handle differences gracefully.
     max_rows = max(len(row_names) for _, row_names, _ in scanner_data.values())
-    max_cols = max(len(col_names) for _, _, col_names in scanner_data.values())
-    cell_total_h = max_rows * _CELL
-    cell_total_w = max_cols * _CELL
-    ax_w = cell_total_w + 2.5  # colorbar + y-labels
-    ax_h = cell_total_h + 2.2  # title + x-labels
-    fig_w = k * ax_w + 0.4
-    fig_h = ax_h + 0.6  # suptitle margin
+    col_counts = [len(scanner_data[phase][2]) for phase in phases]
 
-    fig, axes = plt.subplots(1, k, figsize=(fig_w, fig_h), constrained_layout=True)
-    if k == 1:
-        axes = [axes]
+    # Shared scale across phases for the same heatmap type (pred cosine).
+    finite_all = np.concatenate(
+        [scanner_data[phase][0][~np.isnan(scanner_data[phase][0])] for phase in phases]
+    )
+    shared_vmin = max(float(finite_all.min()) - 0.02, 0.0) if finite_all.size else 0.8
+
+    cell_total_h = max_rows * _CELL
+    fig_h = cell_total_h + 2.8
+    fig_w = sum(c * _CELL for c in col_counts) + 2.8 * k + 0.6
+
+    fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=True)
+    gs = fig.add_gridspec(1, k, width_ratios=[max(c, 1) for c in col_counts])
+    axes = [fig.add_subplot(gs[0, i]) for i in range(k)]
 
     for ax, phase in zip(axes, phases):
         mat, row_names, col_names = scanner_data[phase]
-        finite = mat[~np.isnan(mat)]
-        vmin = max(float(finite.min()) - 0.02, 0.0) if finite.size else 0.8
+        # test and holdout should be square; scorpion may be rectangular.
+        phase_is_square = phase in ("test", "test_holdout_staining")
         _draw_heatmap(
             ax,
             mat,
             row_names,
             col_names,
             phase.replace("_", " "),
-            vmin,
+            shared_vmin,
+            force_square=phase_is_square,
         )
 
     fig.suptitle(f"Scanner heatmaps — {label}", fontsize=11)
@@ -717,18 +731,24 @@ def _draw_diff_heatmap(
     row_names: list[str],
     col_names: list[str],
     title: str,
+    abs_max: float,
+    force_square: bool,
 ) -> None:
     n_rows = len(row_names)
     n_cols = len(col_names)
-    finite = mat[~np.isnan(mat)]
-    abs_max = max(float(np.abs(finite).max()), 1e-6) if finite.size else 0.1
+
+    if force_square:
+        ax.set_box_aspect(1.0)
+    else:
+        ax.set_box_aspect(n_rows / max(n_cols, 1))
+
     vmin, vmax = -abs_max, abs_max
     im = ax.imshow(
         mat,
         cmap=CMAP_DIFF,
         vmin=vmin,
         vmax=vmax,
-        aspect="auto",
+        aspect="equal",
         interpolation="nearest",
     )
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -771,17 +791,25 @@ def build_scanner_diff_heatmaps_page(
     k = len(phases)
 
     max_rows = max(len(row_names) for _, row_names, _ in diff_data.values())
-    max_cols = max(len(col_names) for _, _, col_names in diff_data.values())
-    cell_total_h = max_rows * _CELL
-    cell_total_w = max_cols * _CELL
-    ax_w = cell_total_w + 2.5
-    ax_h = cell_total_h + 2.2
-    fig_w = k * ax_w + 0.4
-    fig_h = ax_h + 0.6
+    col_counts = [len(diff_data[phase][2]) for phase in phases]
 
-    fig, axes = plt.subplots(1, k, figsize=(fig_w, fig_h), constrained_layout=True)
-    if k == 1:
-        axes = [axes]
+    # Shared symmetric scale across phases for the same heatmap type (improvement).
+    finite_vals = [
+        diff_data[phase][0][~np.isnan(diff_data[phase][0])] for phase in phases
+    ]
+    finite_vals = [v for v in finite_vals if v.size > 0]
+    if finite_vals:
+        abs_max = max(float(np.abs(np.concatenate(finite_vals)).max()), 1e-6)
+    else:
+        abs_max = 0.1
+
+    cell_total_h = max_rows * _CELL
+    fig_h = cell_total_h + 2.8
+    fig_w = sum(c * _CELL for c in col_counts) + 2.8 * k + 0.6
+
+    fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=True)
+    gs = fig.add_gridspec(1, k, width_ratios=[max(c, 1) for c in col_counts])
+    axes = [fig.add_subplot(gs[0, i]) for i in range(k)]
 
     for ax, phase in zip(axes, phases):
         mat, row_names, col_names = diff_data[phase]
@@ -791,6 +819,8 @@ def build_scanner_diff_heatmaps_page(
             row_names,
             col_names,
             f"{phase.replace('_', ' ')} (imgaug - origtrans)",
+            abs_max=abs_max,
+            force_square=(phase in ("test", "test_holdout_staining")),
         )
 
     fig.suptitle(f"Scanner improvement heatmaps — {label}", fontsize=11)

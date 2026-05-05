@@ -1,0 +1,63 @@
+# CycleGAN feature-space scanner translation — Virchow2, limited scanners.
+# Reuses the all-pairs metadata; filter_scanners subsets to GT450 and P at
+# dataset construction time — no re-preparation step needed.
+#
+# If the all-pairs metadata does not exist yet, run:
+# python -m histaug.cyclegan_features.prepare_data \
+#     --features_root /mnt/data/plismbench/features/virchow2 \
+#     --all_pairs \
+#     --output_dir /mnt/data/plismbench/features/CycleGAN/virchow2_all_pairs_meta
+#
+# Train:
+# python -m histaug.cyclegan_features.train --config src/histaug/config/CycleGAN_virchow2_limited.yaml
+#
+# Use data_fraction to train on a subset, e.g. 10% of patches:
+#   python -m histaug.cyclegan_features.train \
+#       --config src/histaug/config/CycleGAN_virchow2_limited.yaml \
+#       --data_fraction 0.1
+
+paired_data: /mnt/data/plismbench/features/CycleGAN/virchow2_all_pairs_meta/train.pt
+val_data:    /mnt/data/plismbench/features/CycleGAN/virchow2_all_pairs_meta/val.pt
+feature_dim: 2560
+
+# Restrict to GT450 and P; chunks for all other scanners are skipped.
+filter_scanners: [GT450, P, S360, SQ]
+
+# Same bottleneck generator / FiLM as the all-pairs run.
+discriminator_hidden_dim: 64
+discriminator_dropout: 0.3
+discriminator_use_spectral_norm: true
+hidden_dims: [512, 256]
+use_film: true
+
+batch_size: 256
+epochs: 30
+lr: 2.0e-4
+lr_d: 1.0e-5
+lr_decay_epochs: 10
+beta1: 0.5
+beta2: 0.999
+
+lambda_cyc: 5.0
+lambda_idt: 0.5
+lambda_paired: 10.0
+lambda_adv: 0.1
+loss_alpha: 0.2   # a * L1 + a * (1 - cosine)
+loss_delta: 0.5   # Huber loss delta parameter
+lambda_coral: 0.05  # CORAL covariance alignment (fake vs real)
+lambda_rel: 0.1    # relational pairwise-similarity structure preservation
+
+# Set data_fraction < 1.0 to train on a random subset of patches per chunk.
+data_fraction: 0.25
+
+replay_buffer_size: 1
+seed: 2025
+num_workers: 8
+save_interval: null
+log_interval: 1
+output_dir: /workspaces/HistAug-PLISM/src/histaug/logs/cyclegan/virchow2_limited
+
+wandb_project: HistAug-PLISM
+wandb_run_name: virchow2-cyclegan-limited
+wandb_group: CycleGAN
+wandb_tags: [virchow2, tgt-only, bottleneck, GT450-P]

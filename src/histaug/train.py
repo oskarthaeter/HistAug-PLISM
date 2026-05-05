@@ -103,6 +103,12 @@ def build_model(cfg) -> pl.LightningModule:
     :param cfg: Configuration object containing Model, Loss, Optimizer, Scheduler, and Data settings.
     :return: Configured ModelInterface instance.
     """
+    dataset_name = cfg.Data.get("dataset_name", None)
+    if dataset_name == "plism_pair_prefeatures_dataset":
+        data_feature_dim = cfg.Data.get("feature_dim", None)
+        if data_feature_dim is not None:
+            cfg.Model.input_dim = int(data_feature_dim)
+
     return ModelInterface(
         general=cfg.General,
         model=cfg.Model,
@@ -407,6 +413,7 @@ def main() -> None:
         )
 
     model = build_model(cfg)
+    print(model)
     trainer = build_trainer(cfg, loggers, callbacks)
 
     # Dump train / val / test_holdout_staining membership so the run is reproducible

@@ -1,0 +1,67 @@
+# Experiment 3: Warm init from the virchow2 scanner-transfer checkpoint.
+#
+# Architecture: FiLM FeatureGenerator (use_film=true), hidden_dims=[128, 64].
+# This matches the ScannerTransferLayerModel in:
+#   virchow2-transfer-bottleneck-tgt_spectral_norm_all/last.ckpt
+# which has hidden_dims=[128, 64], conditioning=[tgt_scanner], spectral_norm_all=True.
+#
+# Key mapping applied at load time:
+#   layers.0.weight_orig → layers.0.weight  [128, 2560]  exact
+#   layers.0.bias        → layers.0.bias    [128]        exact
+#   layers.1.weight_orig → layers.1.weight  [64, 128]    exact
+#   layers.1.bias        → layers.1.bias    [64]         exact
+#   decoder.weight       → decoder.weight   [2560, 64]   exact
+#   decoder.bias         → decoder.bias     [2560]       exact
+#   film_layers.*.linear.weight  [256/128, 7] — skipped (cond vocab mismatch, stays zero-init)
+#   film_layers.*.linear.bias    [256/128]    exact
+#
+# The full feature-transformation path (encoder + decoder) is initialized from
+# the scanner-transfer model. FiLM conditioning weights are re-learned from scratch
+# (zero-init) since the 7-scanner vocab cannot be remapped to 4 scanners safely.
+
+paired_data: /mnt/data/plismbench/features/CycleGAN/virchow2_all_pairs_meta/train.pt
+val_data:    /mnt/data/plismbench/features/CycleGAN/virchow2_all_pairs_meta/val.pt
+feature_dim: 2560
+
+filter_scanners: [GT450, P, S360, SQ]
+
+discriminator_hidden_dim: 64
+discriminator_dropout: 0.3
+discriminator_use_spectral_norm: true
+hidden_dims: [128, 64]   # matches the scanner-transfer checkpoint
+use_film: true            # FiLM mode matches layers.*/film_layers.*/decoder.* key structure
+
+batch_size: 256
+epochs: 50
+lr: 2.0e-4
+lr_d: 1.0e-5
+lr_decay_epochs: 15   # final 30% of training (epochs 36-50), scaled from 10/30
+beta1: 0.5
+beta2: 0.999
+
+lambda_cyc: 5.0
+lambda_idt: 2.0       # increased from 0.5: identity collapsed in both reference runs, warm init amplifies this
+lambda_paired: 10.0
+lambda_adv: 0.05      # halved from 0.1: discriminator dominates too early in reference runs
+loss_alpha: 0.2
+loss_delta: 0.5
+lambda_coral: 0.05
+lambda_rel: 0.0       # disabled: increased throughout both reference runs, fighting other objectives
+
+# Stabilization.
+grad_clip_norm: 1.0
+lambda_adv_ramp_epochs: 12   # faster ramp: FiLM weights learn quickly; leaves 38 epochs of full adversarial training
+replay_buffer_size: 50
+generator_init_checkpoint: /workspaces/HistAug-PLISM/src/histaug/logs/virchow2-transfer-bottleneck-tgt_spectral_norm_all/last.ckpt
+
+data_fraction: 0.10
+seed: 2025
+num_workers: 8
+save_interval: null
+log_interval: 1
+output_dir: /workspaces/HistAug-PLISM/src/histaug/logs/cyclegan/virchow2_limited_warmInit_v2
+
+wandb_project: HistAug-PLISM
+wandb_run_name: virchow2-cyclegan-limited-warmInit-v2
+wandb_group: CycleGAN
+wandb_tags: [virchow2, tgt-only, film, GT450-P-S360-SQ, grad-clip, warm-init, spectral-norm-all, 50ep]
